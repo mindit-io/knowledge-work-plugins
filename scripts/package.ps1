@@ -8,8 +8,16 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/package.ps1 sales
 #   powershell -ExecutionPolicy Bypass -File scripts/package.ps1 partner-built/slack
 #   powershell -ExecutionPolicy Bypass -File scripts/package.ps1 all
+#
+# Note: Uses .NET ZipFile API instead of Compress-Archive to ensure
+# forward-slash path separators (ZIP spec §4.4.17.1). Compress-Archive
+# on Windows PowerShell writes backslashes, which Cowork rejects as
+# "zip file contains path with invalid characters".
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $distDir  = Join-Path $repoRoot "dist"
 if (-not (Test-Path $distDir)) { New-Item -ItemType Directory -Path $distDir | Out-Null }
@@ -30,11 +38,40 @@ function Package-Plugin {
 
     if (Test-Path $outFile) { Remove-Item $outFile }
 
-    # Collect items excluding unwanted directories/files
     $exclude = @(".git", "node_modules", ".env")
-    $items   = Get-ChildItem -Path $fullPath -Exclude $exclude
 
-    Compress-Archive -Path $items.FullName -DestinationPath $outFile -CompressionLevel Optimal
+    # Create zip using .NET API with forward-slash entry names
+    $zipStream = [System.IO.File]::Create($outFile)
+    $archive   = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+
+    $files = Get-ChildItem -Path $fullPath -Recurse -File
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($fullPath.Length + 1)
+
+        # Skip excluded directories
+        $skip = $false
+        foreach ($ex in $exclude) {
+            if ($relativePath -like "$ex\*" -or $relativePath -like "$ex/*" -or $relativePath -eq $ex) {
+                $skip = $true
+                break
+            }
+        }
+        if ($relativePath -like "*.zip") { $skip = $true }
+        if ($skip) { continue }
+
+        # Normalize to forward slashes (ZIP spec requirement)
+        $entryName = $relativePath -replace '\\', '/'
+
+        $entry = $archive.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+        $entryStream = $entry.Open()
+        $fileStream  = [System.IO.File]::OpenRead($file.FullName)
+        $fileStream.CopyTo($entryStream)
+        $fileStream.Close()
+        $entryStream.Close()
+    }
+
+    $archive.Dispose()
+    $zipStream.Close()
 
     $size = [math]::Round((Get-Item $outFile).Length / 1KB)
     Write-Host "OK    $zipName (${size} KB)"
