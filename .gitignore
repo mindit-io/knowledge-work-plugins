@@ -1,0 +1,14 @@
+# Packaged zips
+dist/
+*.zip
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (future use)
+node_modules/
